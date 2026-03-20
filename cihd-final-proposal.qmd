@@ -1,0 +1,307 @@
+---
+title: Re-Evaluating Endpoint Efficacy in the A4 Trial Using Causal Frameworks for Missing Data
+subtitle: STATS C160 - Final Project
+author:
+  - name: Tselmen Anuurad
+    email: tsel@ucla.edu
+    affiliations: 
+        - id: ucla
+          name: University of California, Los Angeles
+          department: Department of Statistics
+          address: 8125 Math Sciences Bldg.
+          city: Los Angeles
+          state: CA
+          postal-code: 90095
+    attributes:
+        corresponding: true
+    affilations:
+        - ref: ucla
+date: last-modified
+format:
+  elsevier-pdf:
+    keep-tex: true
+    journal:
+      name: STATS C160 Final Project
+      model: 5p
+      cite-style: authoryear
+    include-in-header:
+      text: |
+        \usepackage{titlesec}
+        \titleformat*{\section}{\Large\bfseries}
+        \titleformat*{\subsection}{\large\bfseries}
+        \usepackage{tabularx} \usepackage{booktabs}
+---
+
+# Motivations
+
+The following report is motivated by the missing data and attrition observed during the Anti-Amyloid Treatment in Asymptomatic Alzheimer's (A4) Study.
+
+A previous secondary analysis (carried out by the author of this report) on the A4 Study systematically evaluated twelve cognitive and functional endpoints from the study protocol to identify optimal outcome measures that can detect and *predict* cognitive and functional decline in preclinical Alzheimer's Disease (AD) populations. By relying on complete-case analysis (CCA), the analytic sample was reduced 416 to 200 individuals ($\approx 48$% loss in observations), introducing vulnerability to attrition bias (\[13, 14\]).
+
+In this paper, we causally evaluate how the missing data mechanisms in the A4 Study biased the previous predictive performance metrics, in particular the odds ratios and AUC proposed by the previous analysis. The focus of our causal query is estimating the true predictive accuracy of cognitive change scores on progression to dementia. We split the analysis into two parts based on two probable assumptions: (i) under MAR, we map the observed complete-case distribution back to the target distribution utilizing Inverse Propensity Weighting (IPW), and (ii) under MNAR, we conduct a sensitivity analysis to evaluate the robustness of these findings with the belief that unobserved clinical progression directly causes study attrition.
+
+# Background
+
+AD develops slowly from a preclinical phase into a fully expressed clinical syndrome, with pathological changes beginning years to decades before the emergence of cognitive symptoms \[1-5\]. Preclinical AD is now defined operationally by the presence of amyloid abnormality in cognitively unimpaired individuals \[6\]. Therefore, secondary prevention trials, like the A4 Study, now target this preclinical phase to delay or prevent progression to symptomatic disease, using early indicators of decline as trial endpoints \[7\].
+
+The A4 study was a landmark Phase 3 randomized clinical trial that enrolled cognitively unimpaired older adults with elevated brain amyloid to assess whether the anti-amyloid agent solanezumab could slow cognitive decline \[8\]. Despite rigorous design and thorough follow-up over four-and-a-half years (\~ $240$ weeks), the A4 Study did not meet its primary endpoint and highlighted significant challenges, including the need for more sensitive outcome measures capable of detecting meaningful change in preclinical populations \[9, 10\].
+
+Among the endpoints evaluated in the original analysis, the Cognitive Function Index (CFITOTAL)— a subjective measure comprising fifteen questions that capture a participant's and their study partner's cognitive concerns compared to one year prior— emerged as a highly promising candidate for predicting long-term clinical progression. Therefore, CFITOTAL was chosen to be the focus of our causal re-evaluation in this report.
+
+# Methods
+
+## Original Analysis (Complete Case)
+
+The original analysis utilized change-from-baseline scores at the clinically relevant one-year time point (Week 48) to predict progression on the Clinical Dementia Rating (CDR) global score at Week 240. CDR was operationalized as a binary outcome, with 0 indicating "normal" cognition and 1 indicating a CDR score of 0.5 or greater. The change-from-baseline scores at select follow-up visits were calculated by subtracting each participant's baseline value from their follow-up score. These change scores were then standardized into z-scores, allowing direct comparison of effect sizes across measures with different scales.
+
+Binary logistic regression models were fit for each candidate endpoints at varying time points. All regression analyses employed a complete case approach which required: (1) baseline measurement for the cognitive endpoint, (2) change-from-baseline measurement at the predictor timepoint (Week 48), and (3) CDR global score assessment at Week 240. Participants missing any of these components were excluded. Predictive accuracy was measured using AUC, which was used to determine an endpoint's sensitivity to detecting differential effects between those who progressed and those who remain cognitively stable.
+
+## The Causal Framework & Missingness Graphs
+
+```{r, fig.cap= 'On the left is our MAR m-graph (M1). To the right, the additional edge from Y to its missingness mechanism encodes a MNAR assumption (M2).', out.width="100%", echo=FALSE}
+knitr::include_graphics("M1M2.png")
+```
+
+For this report, we formalize the missing data problem using missingness graphs (m-graphs). First, we define the following core study variables:
+
+1.  **Baseline Covariates** ($Z$): Baseline characteristics including age ($C_1$), State-Trait Anxiety Inventory (STAI) score ($C_2$), years of education ($C_3$), APOE$\epsilon4$ carrier status ($C_4$), and baseline CFITOTAL score ($C_5$).
+
+2.  **Predictor** ($X$): The standardized change-from-baseline CFITOTAL score at Week 48
+
+3.  **Outcome** ($Y$): The true Week 240 CDR global status
+
+We omit the missingness indicator for $X$ ($R_X$) from our m-graphs for two reasons. Only 6 out of 422 participants (1.4%) were missing their Week 48 CFITOTAL assessments. We explicitly define our causal query to target the sub-population of individuals with recorded Week 48 scores. By conditioning the analysis on this specific sub-population and excluding those 6 initial dropouts, the Week 48 assessment $X$ becomes a fully observed variable in our set $V_o$. Consequently, $P(R_X = 1) = 1$ for our entire cohort, rendering $R_X$ a deterministic constant.
+
+Therefore, the sole missingness mechanism in our model is $R_Y$, the indicator for Week 240 study retention. $R_Y=1$ if the participant remained in the study and their Week 240 CDR status was recorded, and $R_Y=0$ if they dropped out. This gives us the proxy variable $Y^*$, representing the observed Week 240 progression status, defined as $Y^* = Y$ if $R_Y = 1$, and missing ($NA$) if $R_Y = 0$ \[17\]. In summary, our sets of variables can formally be categorized as
+
+1.  **Fully Observed Variables**: $V_o = \{Z, X\}$
+
+2.  **Partially Missing Variables**: $V_m = \{Y\}$
+
+3.  **Proxy Variables**: $V^* = \{Y^*\}$
+
+## Justification of Missingness Assumptions
+
+In the table on the next page, we detail the structural assumptions of our proposed m-graphs by describing the likely causal relationships between our underlying study variables ($V$) and the missingness indicator for $Y$ ($R_Y$).
+
+\begin{table*}[t]
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\toprule
+Variable ($V_i$) $\rightarrow$ & Missingness Indicator ($R_Y$) \\
+\midrule
+\textbf{Age} ($C_1$) & \textbf{Likely:} Raman et al. (2024) found that older participants were more likely to drop out in the A4 study. This is consistent with other meta-analysis conducted on this trial. \\
+\addlinespace
+
+\textbf{Baseline STAI} ($C_2$) & \textbf{Likely:} Higher initial anxiety can lead to frustration with trial demands, increasing the likelihood of early discontinuation [11]. \\
+\addlinespace
+
+\textbf{Years of Education} ($C_3$) & \textbf{Likely:} Lower educational attainment is a well-established predictor of attrition in AD and aging research. This is often attributed to differences in health literacy, socioeconomic barriers, or higher perceived burden/fatigue when completing neurocognitive assessments [12]. \\
+\addlinespace
+
+\textbf{APOE$\epsilon$4 Status} ($C_4$) & \textbf{Likely:} Increased genetic risk is likely to motivate participants to remain in the study especially in the preclinical stage of the disease [11]. \\
+\addlinespace
+
+\textbf{Baseline Score} ($C_5$) & \textbf{Likely:} Baseline score was significantly correlated with Week 240 progression to dementia in our original analysis. Furthermore, we suspect participants with lower baseline subjective cognitive decline may perceive less personal risk or benefit from the trial. \\
+\addlinespace
+
+\textbf{Week 48 $\Delta$ Score} ($X$) & \textbf{Likely:} We believe from the prior analysis that individuals experiencing faster early cognitive decline may lack the capacity or motivation to comply with long-term study visits, resulting in dropout. \\
+\addlinespace
+
+\textbf{Week 240 CDR Global} ($Y$) & \textbf{M1 (MAR) Not Likely:} Assumes that after accounting for early cognitive change ($X$) and baseline factors ($Z$), the onset of dementia does not have an additional effect on dropout. \\
+& \textbf{M2 (MNAR) Likely:} Assumes participants dropped out because they developed dementia. In this case, the actual, unobserved disease is what causes the missing data. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+# Analysis
+
+## Exploratory Data Analysis
+
+To better understand the missing data mechanisms, an exploratory data analysis was carried out comparing baseline characteristics and longitudinal cognitive decline between study participants who dropped out and those who were retained.
+
+```{r, fig.cap= '', out.width="100%", echo=FALSE}
+knitr::include_graphics("stai_dens.png")
+```
+
+```{r, fig.cap= 'Distributions of baseline CFI Total and STAI scores, grouped by study retention. Pink indicates the cohort that dropped out, while green represents those who had Week 240 CDR reported.', out.width="100%", echo=FALSE}
+knitr::include_graphics("base_cfitotal_dens.png")
+```
+
+Recent literature on the A4 study found that elevated anxiety, as measured by the State-Trait Anxiety Inventory (STAI), and age significantly increased the likelihood of overall study discontinuation \[11\]. Motivated by these findings, several density plots comparing baseline characteristics between study participants who dropped out and those that were retained were explored (see Appendix). The first density plot visually illustrates that individuals who dropped out exhibited a rightward shift in their baseline STAI scores compared to those who did not drop out. The median STAI score for the dropout group (10) is higher than those of the retained group (9).
+
+To formally compare the difference in STAI scores between the two groups, a Wilcoxon rank-sum test was used to test the null hypothesis that the population medians are equal ($H_0: \tilde{\mu}_0 = \tilde{\mu}_1$) against the two-sided alternative ($H_a: \tilde{\mu}_0 \neq \tilde{\mu}_1$). A Wilcoxon rank-sum test was used since STAI scores are discrete ordinal integers that are known to exhibit right-skewed, non-normal distributions. The test yielded a non-significant result ($p = 0.126$), failing to reject $H_0$. Similarly, the difference in age was found to not be significant via Welch's two-sample t-test ($p = 0.9539$, see Appendix).
+
+However, baseline CFI scores were found to be significantly lower in the dropout cohort (median = $2.55$) compared to the retained cohort (median = $3.20$) via the Wilcoxon rank-sum test ($p = 0.046$, see Appendix). A lower CFI score indicates that the participant perceives fewer subjective cognitive and functional issues. Perhaps, participants who do not perceive themselves as suffering from cognitive decline at baseline may conclude that they face less personal risk from AD, influencing drop out.
+
+Furthermore, the proportion of APOE$\epsilon4$ carriers was exactly identical across both groups (see Appendix). Raman et al. (2024) observed that APOE$\epsilon4$ carriers were generally less likely to drop out across the entire A4 trial. While genetic risk motivates participants to seek out and enroll in secondary prevention trials, this finding suggests that APOE$\epsilon4$ status may not strongly influence long-term trial retention for individuals who have already committed to and survived the first year of the protocol.
+
+```{r, fig.cap= 'Longitudinal trajectory of mean standardized CFITOTAL change scores.', out.width="100%", echo=FALSE}
+knitr::include_graphics("cfi_change_overtime.png")
+```
+
+Beyond baseline characteristics, examining the data longitudinally highlights differing cognitive outcomes over the course of the study between the two groups. Figure 3 reveals that participants who ultimately dropped out showed a clear, progressive worsening in their mean standardized CFI change scores from Week 48 through Week 204. In contrast, the retained cohort remained relatively stable throughout the study. These results suggest that the individuals experiencing the fastest cognitive deterioration are likely the individuals dropping out of the study.
+
+Ultimately, these descriptive explorations of the data provide evidence that the missing data in the A4 study is likely **not** missing completely at random. Instead, the data supports the idea that study attrition is systematically related to both observed baseline covariates and the trajectory of cognitive decline itself.
+
+## Part I: Missing at Random (M1)
+
+For M1, IPW was used to estimate the conditional probability that a participant remains in the study until Week 240, denoted $P(R_Y = 1 | Z, X)$ \[17\]. First, a logistic regression model was fit using all of the fully observed variables $Z$ and $X$ to block the confounding paths to $R_Y$.
+
+$$ 
+\begin{aligned}
+\text{logit}(P(R_{Y,i} = 1)) &= \alpha_0 + \alpha_1(\text{Age}_i) + \alpha_2(\text{STAI}_i) + \\
+&\quad + \alpha_3(\text{Edu}_i) + \alpha_4(\text{APOE}_i) \\
+&\quad + \alpha_5(\text{Baseline}_i) + \alpha_6(z\Delta\text{CFI}_{W48,i})
+\end{aligned}
+$$
+
+The model's coefficients demonstrate the strength of each covariate's influence on study retention. The predicted probabilities from this model were then used to calculate the inverse probability weight.
+
+$$
+W_i = \frac{1}{\hat{P}(R_{Y,i} = 1 | Z_i, Xi)}
+$$ These weights were applied to the logistic regression model that is the focus of the causal query:
+
+$$
+\text{logit}(P(Y_i = 1)) = \beta_0 + \beta_1(X_i) + \beta_2(Z_i)
+$$
+
+### Results
+
+```{r, fig.cap= 'Overlaid density plots of 2000 bootstrap samples comparing the CCA and IPW coefficients show that IPW consistently results in stronger associations with CDR progression.', out.width="100%", echo=FALSE}
+knitr::include_graphics("ipw_bootstrap_coef.png")
+```
+
+The final IPW model gives us $\hat{\beta}_{1, IPW} = 0.778$ which is larger than $\hat{\beta}_{1, CCA} = 0.689$. To determine whether the difference between the CCA and IPW coefficients is actually statistically significant or simply the result of noise, we conduct a hypothesis test for the parameter $\theta = \beta_{1, IPW} - \beta_{1, CCA}$:
+
+$$
+\begin{aligned}
+H_0: \theta = 0 \\
+H_A: \theta \neq 0
+\end{aligned}
+$$ This test was carried out with non-parametric bootstrap resampling. The resulting 95% bootstrap confidence intervals for the difference ($\hat{\theta} = \hat{\beta}_{IPW} - \hat{\beta}_{CCA}$) excludes zero \[0.0001, 0.2023\], rejecting the null hypothesis at the $\alpha = 0.05$ level. This indicates that the IPW correction consistently yields a larger log-odds coefficient, suggesting that the original CCA suffers from bias induced by attrition and underestimates the predictive power of early subjective cognitive decline on long-term AD progression. However, it *is* noted that the lower bound of the confidence interval is essentially $0$. This indicates the exact magnitude of the necessary IPW correction is sensitive to natural sampling variance. Ultimately, correcting for this missingness mechanism validates the CFITOTAL change score as a robust and potentially undervalued clinical predictor.
+
+### MICE & AUC
+
+To evaluate the impact of attrition on overall predictive accuracy, we utilized MICE to generate 500 imputed datasets. A similar logistic regression model was fit to each completed dataset, and the AUC was calculated to form a distribution of predictive performance under MAR.
+
+```{r, fig.cap= 'meow', out.width="100%", echo=FALSE}
+knitr::include_graphics("auc_mice_plot.png")
+```
+
+When evaluating overall predictive accuracy, the original CCA model yielded a baseline AUC of approximately $0.7416$. However, the density of the 500 MICE-imputed AUC's revealed a slight leftward shift, with the distribution peaking near $0.73$. While correcting for missingness reveals the log-odds coefficient of CFITOTAL to be stronger than originally thought, the overall accuracy of the model drops slightly, possibly because the imputed dropout data introduces more variance and uncertainty.
+
+## Part II: Missing Not at Random (M2)
+
+```{r, fig.cap= 'Sensitivity analysis results from synthetic MNAR imputation models. Coefficients and SEs were pooled together via Rubin\'s Rules', out.width="100%", echo=FALSE}
+knitr::include_graphics("mnar_sensitivity_table.png")
+```
+
+Under MNAR assumptions, a sensitivity analysis is required in order to explore how the conclusions of the study would change if the unobserved onset of dementia directly caused participants to drop out of the trial. In this setting, we assume that the probability of dropout conditional on the outcome and all covariates is equal to the probability of dropout conditional only on the outcome:
+
+$$
+P(R_Y = 0 | Y, X, Z) = P(R_Y = 0 | Y)
+$$
+
+From this, we are able to derive the probability that a person drops out given that they actually progressed to dementia, $P_{m, y1} = P(R_Y = 0 | Y = 1)$, and the probability that a person drops out given they did *not* progress to dementia, $P_{m, y0} = P(R_Y = 0 | Y = 0)$ \[17\].
+
+Utilizing these two probabilities, we calculate the sensitivity parameter, or risk ratio, $\Gamma$.
+
+$$
+\Gamma = \frac{P_{m, y1}}{P_{m, y0}} = \frac{ P(R_Y = 0 | Y = 1)}{ P(R_Y = 0 | Y = 0)}
+$$ We parameterize the unobserved outcomes of the dropout cohort using an assumed progression rate, $\pi_{drop}$. By varying $\pi_{drop}$ from $0$ (assuming *no* dropouts progressed to CDR = 1) to $1$ (assuming *all* dropouts progressed), we calculate the conditional missingness probabilities $P_{m, y1}$ and $P_{m, y0}$, alongside the sensitivity parameter $\Gamma$. For each rate, missing outcomes are multiply imputed by taking repeated random draws from a Bernoulli distribution parameterized by $\pi_{drop}$. Finally, the primary logistic regression model is fitted to each synthetic dataset, with the resulting coefficients and standard errors pooled together to produce the estimates presented in the adjacent table \[18, 19\].
+
+The sensitivity analysis demonstrates that the CFITOTAL endpoint is robust under severe MNAR conditions. Across the entire range of $\pi_{drop}$ for the unobserved dropout cohort, the predictive log-odds coefficient remains relatively stable (ranging from $0.324$ to $0.438$) and statistically significant ($p < 0.05$, see Appendix for full table). This indicates that the predictive power of early subjective cognitive decline is not an artifact of the missing data mechanism; the association holds even under the most extreme assumptions regarding patient attrition.
+
+# Discussion & Implication
+
+The primary objective of this analysis was to evaluate the true predictive validity of early subjective cognitive decline, as measured by CFITOTAL, on long-term progression to clinical dementia, isolated from the effects of study attrition. However, evaluating this endpoint within the A4 study required addressing a non-random missing data mechanism. The empirical data confirm that study attrition in the A4 trial disproportionately impacted participants who felt subjectively healthier at baseline, introducing a structural attenuation bias. Correcting for this MAR dropout mechanism with IPW revealed that the Week 48 CFITOTAL assessment is a stronger and more sensitive predictor of long-term clinical progression than the original model suggests. The bootstrap algorithm confirms that the IPW methodology successfully recovered a structural effect that was erased by systematic attrition. By demonstrating that one-year changes in subjective cognitive assessments (CFITOTAL) are highly predictive of four-and-a-half-year objective clinical decline, and showing that this relationship survives severe attrition and MNAR assumptions, we are able to able to justify their use in evaluating drug efficacy on highly accelerated timelines in preclinical AD populations.
+
+# Limitations & Future Avenues to Explore
+
+While the causal frameworks applied in this analysis provide a more accurate estimation of endpoint efficacy, several limitations remain. First, the IPW model fundamentally relies on the MAR assumption. If unmeasured confounders cause study attrition and clinical cognitive decline, the IPW estimates may still suffer from omitted variable bias. Future analyses could quantify the potential impact of this unobserved confounding by utilizing E-values to determine the minimum joint strength an unmeasured confounder would need to explain away the predictive efficacy of the Week 48 CFITOTAL score \[17\].
+
+Furthermore, our analysis assumes that the observed CFITOTAL score perfectly reflects true subjective cognitive decline. Because CFITOTAL relies on both self- and study-partner reporting, it is susceptible to complex measurement error. A phenomenon in neurodegenerative disease is anosognosia, a clinical lack of insight where patients suffering from the fastest true disease progression systematically under-report their symptoms as their self-awareness deteriorates \[20\]. Future expansions of this research should explore measurement error correction techniques to recover the true causal effect of early cognitive changes under differential error constraints \[17\]. Furthermore, expanding this causal missing data framework to other composite scores evaluated in the A4 study will help determine if attrition bias uniformly masks the efficacy of all early AD endpoints.
+
+As a final note, the author of this report would like to express that this examination has been an excellent and eye-opening exercise into the statistical techniques beyond CCA and the world of causal inference. Despite the trials and tribulations of the quarter, this project and class have been intellectually rewarding and has undoubtedly helped prepare the author for her future endeavors in graduate-level biostatistics!
+
+\clearpage
+
+# Appendix {.unnumbered}
+
+```{r, fig.cap= 'Full sensitivity table', out.width="100%", echo=FALSE}
+knitr::include_graphics("mnar_sensitivity_table_appendix.png")
+```
+
+```{r, fig.cap= 'Comparing age across two groups. Not found to be significantly different.', out.width="100%", echo=FALSE}
+knitr::include_graphics("age_dens.png")
+```
+
+```{r, fig.cap= 'Comparing APOE4 Status between two groups. Two groups almost identical.', out.width="100%", echo=FALSE}
+knitr::include_graphics("apoe4-status.png")
+```
+
+```{r, fig.cap= 'Two-sample t-test comparing age in two groups (R output)', out.width="100%", echo=FALSE}
+knitr::include_graphics("age_hyp_test.png")
+```
+
+```{r, fig.cap= 'Wilcoxon rank-sum test for STAI (R output)', out.width="100%", echo=FALSE}
+knitr::include_graphics("STAI_hypothesis_test.png")
+```
+
+```{r, fig.cap= 'Wilcoxon rank-sum test for CFI baseline score (R output)', out.width="100%", echo=FALSE}
+knitr::include_graphics("CFI_base_hyp_test.png")
+```
+
+```{r, fig.cap= 'CCA model summary (R output)', out.width="100%", echo=FALSE}
+knitr::include_graphics("CCA_model_sum.png")
+```
+
+```{r, fig.cap= 'Logistic regression predicting R_Y using Z and X (R output) used to calculate IPW weights', out.width="100%", echo=FALSE}
+knitr::include_graphics("R_y_model_sum.png")
+```
+
+```{r, fig.cap= 'IPW model summary (R output)', out.width="100%", echo=FALSE}
+knitr::include_graphics("IPW_model_sum.png")
+```
+
+# References {.unnumbered}
+
+\[1\] Villemagne, V. L. et al. (2013). Amyloid β deposition, neurodegeneration, and cognitive decline in sporadic Alzheimer’s disease: a prospective cohort study. Lancet Neurology, 12(4), 357–367.
+
+\[2\] Gordon, B. A. et al. (2018). Spatial patterns of neuroimaging biomarker change in individuals from families with autosomal dominant Alzheimer’s disease: a longitudinal study. Lancet Neurology, 17(3), 241–250.
+
+\[3\] Quiroz, Y. T. et al. (2020). Plasma neurofilament light chain in the presenilin 1 E280A autosomal dominant Alzheimer’s disease kindred. Lancet Neurology, 19(6), 513–521.
+
+\[4\] Dominantly Inherited Alzheimer Network et al. (2020). A soluble phosphorylated tau signature links tau, amyloid and the evolution of stages of dominantly inherited Alzheimer’s disease. Nature Medicine, 26(3), 398–407.
+
+\[5\] Sperling, R. A. et al. (2011). Toward defining the preclinical stages of Alzheimer’s disease. Alzheimer's & Dementia, 7(3), 280–292.
+
+\[6\] Jack, C. R. et al. (2024). Revised criteria for diagnosis and staging of Alzheimer’s disease: Alzheimer’s Association Workgroup. Alzheimer's & Dementia, 20(8), 5143–5169.
+
+\[7\] McDade, E. & Bateman, R. J. (2017). Stop Alzheimer’s before it starts. Nature, 547(7662), 153–155.
+
+\[8\] Sperling, R. A. et al. (2023). Trial of Solanezumab in Preclinical Alzheimer’s Disease. New England Journal of Medicine, 389, 1096–1107.
+
+\[9\] Price, J. L. & Morris, J. C. (1999). Tangles and plaques in nondemented aging and "preclinical" Alzheimer’s disease. Annals of Neurology, 45(3), 358–368.
+
+\[10\] Brookmeyer, R., Johnson, E., Ziegler‐Graham, K. & Arrighi, H. M. (2007). Forecasting the global burden of Alzheimer’s disease. Alzheimer's & Dementia, 3(3), 186–191.
+
+\[11\] Raman, R. et al. (2024). Baseline Predictors of Study Discontinuation in a Preclinical Alzheimer's Disease Clinical Trial. Alzheimer's & Dementia. PMC11712999.
+
+\[12\] Burke, S. L. et al. (2019). Factors influencing attrition in 35 Alzheimer's Disease Centers across the USA: a longitudinal examination of the National Alzheimer's Coordinating Center's Uniform Data Set. Aging Clinical and Experimental Research, 31(12), 1731-1740.
+
+\[13\] Catalog of Bias. (n.d.). Attrition bias. Retrieved from https://catalogofbias.org/biases/attrition-bias/
+
+\[14\] National Research Council (US) Panel on Handling Missing Data in Clinical Trials. (2010). The Prevention and Treatment of Missing Data in Clinical Trials. National Academies Press (US). PMC2743339.
+
+\[15\] Seaman, S. R., & White, I. R. (2013). Review of inverse probability weighting for dealing with missing data. Statistical Methods in Medical Research, 22(3), 278-295.
+
+\[16\] Holovchak, A. et al. (2025). Recoverability of causal effects under presence of missing data: a longitudinal case study. Biostatistics, 26(1), kxae044.
+
+\[17\] Plecko, D. (2025). Lecture slides (<https://dplecko.com/cihd26/>)
+
+\[18\] Li, N., et al. (2023). Application of Tipping Point Analysis in Clinical Trials using the Multiple Imputation Procedure in SAS. *PharmaSUG 2023*.
+
+\[19\] van Buuren, S. (2018). *Flexible Imputation of Missing Data* (2nd ed.). CRC Press. (Specifically Chapter 3.8: Nonignorable missing data).
+
+\[20\] Alzheimer's Association. (n.d.). Anosognosia. Retrieved from <https://www.alz.org/alzheimers-dementia/what-is-dementia/related_conditions/anosognosia>
