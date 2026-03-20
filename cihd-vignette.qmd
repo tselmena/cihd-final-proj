@@ -1,0 +1,900 @@
+---
+title: "cihd-final-proj"
+format: html
+---
+
+The following vignette produces all of the figures and analysis from the Final Project Report. 
+
+The data was obtained from https://www.a4studydata.org/ which requires setting up an account and completing a data usage agreement. 
+
+After obtaining the data, subsequent data processing was carried out using the code available on this publicly available repository: https://github.com/tselmena/grillen-lab-isi-buds. I am actually the sole author of the main code, helpers, documentation, and README of this original repository! When referencing the original analysis in my project report, this is what I will be referring to. 
+
+After running the code in the above repo, namely `data-processing-and-calculations.qmd`, the following missing data analysis was carried out.
+
+# Libraries & Data Loading
+
+Additional data (beyond what was needed in the original analysis) was loaded. In particular, we retrieve STAI scores. 
+
+Description of STAI: "The State-Trait Anxiety Inventory (STAI) is a commonly used measure of trait and state anxiety (Spielberger, Gorsuch, Lushene, Vagg, & Jacobs, 1983). It can be used in clinical settings to diagnose anxiety and to distinguish it from depressive syndromes. It also is often used in research as an indicator of caregiver distress (e.g., Greene et al., 2017, Ugalde et al., 2014)." https://www.apa.org/pi/about/publications/caregivers/practice-settings/assessment/tools/trait-state
+
+```{r, include=FALSE}
+library(tidyverse)
+library(patchwork)
+library(ggdag)
+library(dagitty)
+library(latex2exp)
+library(ggtext)
+library(showtext)
+library(data.table)
+library(mice)
+library(broom)
+library(knitr)
+library(gt)
+```
+
+```{r}
+STAI_raw <- read_csv(here("data/Raw Data/psychwell.csv"))
+STAI <- STAI_raw |> filter(SUBSTUDY == "A4", VISCODE == "001") |> 
+  select(BID, STAITOTAL)
+```
+
+# Helper Functions
+
+```{r}
+### 1.1) get_data_frames2() #######################################################
+# modified CIHD project function - main change: added R_y variable to df
+get_data_frames2 <- function(data, test_code, target_weeks_w_0 , window_weeks, baseline_window_weeks, outcome_data, outcome_var) {
+  # test_data is ADQS_raw; utilizes given week variable, as opposed to manually 
+  # calculating it as done with CDR and C3
+  test_data <- data |>
+    filter(toupper(QSTESTCD) == test_code, TX == "Placebo") |>
+    select(BID, WEEK = ADURW, SCORE = QSSTRESN) |>
+    # remove any NA results
+    filter(!is.na(WEEK), !is.na(SCORE))
+  
+  if (nrow(test_data) == 0) {
+    # return NULL if no data for this test code
+    return(NULL)
+  }
+  
+  closest <- test_data |>
+    # Create a temporary list-column with the absolute difference to each target week
+    mutate(
+      tmp = map(WEEK, ~ abs(.x - target_weeks_w_0 )),
+      # Find the target week with the minimum difference
+      target_week = map_int(tmp, ~ target_weeks_w_0 [which.min(.x)])
+    ) |>
+    select(-tmp) |>
+    
+    # Filter to keep only visits within the specified window of the assigned target week
+    ### Uses 14 weeks before baseline to capture data for ADL and CFI ### 
+    filter(abs(WEEK - target_week) <= if_else(target_week <= 0, baseline_window_weeks, window_weeks)) |>
+    
+    group_by(BID, target_week) |>
+    # For each subject and target week, keep the visit with the smallest time difference
+    slice_min(order_by = abs(WEEK - target_week), n = 1, with_ties = FALSE) |>
+    ungroup()
+  
+  baseline_scores <- closest |>
+    filter(target_week <= 0) |>
+    group_by(BID) |>
+    # If multiple baseline candidates, take the one with the latest date
+    slice_max(order_by = target_week, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    select(BID, baseline_score = SCORE)
+  
+  wide_followup_scores <- closest |>
+    filter(target_week > 0) |>
+    select(BID, target_week, SCORE) |>
+    pivot_wider(
+      id_cols = BID,
+      names_from = target_week,
+      values_from = SCORE,
+      names_prefix = paste0(test_code, "_W")
+    )
+  
+  # Check if there are any followup scores to process
+  if (ncol(wide_followup_scores) <= 1) {
+    return(NULL)
+  }
+  
+  wide_scores_with_deltas <- wide_followup_scores |>
+    inner_join(baseline_scores, by = "BID") |>
+    mutate(across(
+      .cols = starts_with(paste0(test_code, "_W")),
+      .fns = ~ .x - baseline_score,
+      .names = "delta_{.col}"
+    ))
+  ### CHANGE HERE ###
+  # add R_y variable
+  model_data <- wide_scores_with_deltas |>
+    left_join(
+      outcome_data |> select(BID, all_of(outcome_var)),
+      by = "BID"
+    ) |>
+    mutate(
+      R_y = if_else(!is.na(.data[[outcome_var]]), 1, 0)
+    )
+  
+  # standardize deltas for comparison (z-scores)
+  model_data <- model_data |>
+    mutate(across(
+      .cols = starts_with("delta_"),
+      .fns = ~ as.numeric(scale(.x)),
+      .names = "z_{.col}"
+    ))
+  
+  return(model_data)
+}
+```
+
+```{r}
+### 1) get_data_frames() #######################################################
+## Description: Creates a df corresponding to a cognitive test;
+## Output: 
+# - BID
+# - CDPOS_W240 (response)
+# - Baseline score and each followup score at the 5 target weeks
+# - Raw delta values
+# - Z-score delta values
+# - ** R_y indicator variable
+all_tests_list2 <- map(test_codes, ~get_data_frames2(
+  data = ADQS_raw,
+  test_code = .x,
+  target_weeks = target_weeks_w_0,
+  window_weeks = window_weeks,
+  baseline_window_weeks = baseline_window_weeks,
+  outcome_data = wide_cdr_indicator,
+  outcome_var = "CDPOS_W240"
+))
+names(all_tests_list2) <- test_codes
+all_tests_list2$C3 <- model_data_c3
+```
+
+# Extract CFITOTAL Data
+
+`all_tests_list2` is a list containing 12 dataframes (for each cognitive assessment). Extract our test of interest, `CFITOTAL`. 
+
+```{r}
+cfi_base <- all_tests_list2$CFITOTAL |>
+  left_join(SUBJINFO |> select(BID, AGEYR, EDCCNTU, APOEGNPRSNFLG), by = "BID") |>
+  mutate(
+    APOEGNPRSNFLG = ifelse(APOEGNPRSNFLG == "Yes", 1, 0)
+  ) |>  
+  left_join(STAI, by = "BID")
+
+n_total <- nrow(cfi_base)
+
+cfi_df <- cfi_base |>
+  filter(!is.na(z_delta_CFITOTAL_W48))
+
+n_final <- nrow(cfi_df)
+
+wk48_dropout <- tibble(
+  `Study Timepoint` = c("Baseline", "Week 48"),
+  `N` = c(n_total, n_final)
+)
+
+wk48_dropout
+```
+
+# M-Graphs Creation
+
+These two graphs were saved then pieced together in Canva later to create the final visualization found in the report.
+
+```{r, include=FALSE}
+## set up the theme and defaults
+# custom fonts
+font_add_google("Libre Baskerville", "Linux Libertine O") 
+showtext_auto() 
+showtext_opts(dpi = 300)
+
+# theme function courtesy of https://www.andrewheiss.com/blog/2021/09/07/do-calculus-backdoors/
+my_theme <- function() {
+  theme_dag(base_family = "Linux Libertine O") +
+    theme(plot.title = element_text(size = rel(1.5)),
+          plot.subtitle = element_markdown())
+}
+
+update_geom_defaults(ggdag:::GeomDagText, list(family = "Linux Libertine O",
+                                               fontface = "bold",
+                                               color = "black"))
+```
+
+```{r, echo=FALSE}
+# define m-graph 1
+mgraph1 <- dagify(
+  Y ~ X,
+  X ~ Z,
+  Y ~ Z,
+  #Rx ~ Z,
+  Ry ~ Z + X,
+  coords = list(
+    x = c(Z = 1.5, X = 1, Y = 2, Ry = 1.75),
+    y = c(Z = 2,   X = 1, Y = 1, Ry = 0.25)
+  )
+  # coords = list(
+  #   x = c(Z = 1.5, X = 1, Y = 2, Rx = 1.25, Ry = 1.75),
+  #   y = c(Z = 2,   X = 1, Y = 1, Rx = 0.25, Ry = 0.25)
+  # )
+)
+
+# define m-graph 2
+mgraph2 <- dagify(
+  Y ~ X,
+  X ~ Z,
+  Y ~ Z,
+  
+  #Rx ~ Z,
+  Ry ~ Z + X + Y,
+  coords = list(
+    x = c(Z = 1.5, X = 1, Y = 2, Ry = 1.75),
+    y = c(Z = 2,   X = 1, Y = 1, Ry = 0.25)
+  )
+)
+
+# create a data frame for the C1-C5 inner nodes
+c_nodes <- tibble(
+  name = c("C[1]", "C[2]", "C[3]", "C[4]", "C[5]"), 
+  x = seq(1.25, 1.75, length.out = 5), 
+  y_node = 1.95  
+)
+
+```
+
+``` {r}
+# create the plots
+plot_m_graph1 <- ggplot(mgraph1, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_edges() +
+  geom_dag_point(data = function(df) filter(df, name != "Z"), 
+                 color = "grey80", size = 13) + 
+  geom_dag_text(data = function(df) filter(df, name != "Z")) +
+  
+  # Z box
+  annotate("rect", xmin = 1.18, xmax = 1.82, ymin = 1.68, ymax = 2.22,
+           fill = "white", color = "black", linewidth = 0.6) +
+  # Z label
+  annotate("text", x = 1.5, y = 2.42, label = "Z", 
+           size = 6, fontface = "bold", family = "Linux Libertine O") +
+  
+  # C1-C5 circles
+  geom_point(data = c_nodes, aes(x = x, y = y_node),
+             inherit.aes = FALSE, size = 13, color = "grey80") +
+  
+  # C1-C5 text labels 
+  geom_text(data = c_nodes, aes(x = x, y = y_node, label = name),
+            inherit.aes = FALSE, size = 5, fontface = "bold", parse = TRUE,
+            family = "Linux Libertine O") +
+  my_theme()
+ggsave("mgraph1.png", width = 5, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+```{r}
+plot_m_graph2 <- ggplot(mgraph2, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_edges() +
+  geom_dag_point(data = function(df) filter(df, name != "Z"), 
+                 color = "grey80", size = 13) + 
+  geom_dag_text(data = function(df) filter(df, name != "Z")) +
+  
+  # Z box
+  annotate("rect", xmin = 1.18, xmax = 1.82, ymin = 1.68, ymax = 2.22,
+           fill = "white", color = "black", linewidth = 0.6) +
+  # Z label
+  annotate("text", x = 1.5, y = 2.42, label = "Z", 
+           size = 6, fontface = "bold", family = "Linux Libertine O") +
+  
+  # C1-C5 circles
+  geom_point(data = c_nodes, aes(x = x, y = y_node),
+             inherit.aes = FALSE, size = 13, color = "grey80") +
+  
+  # C1-C5 text labels 
+  geom_text(data = c_nodes, aes(x = x, y = y_node, label = name),
+            inherit.aes = FALSE, size = 5, fontface = "bold", parse = TRUE,
+            family = "Linux Libertine O") + 
+  my_theme()
+ggsave("mgraph2.png", width = 5, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+
+
+# Data Visualizations 
+
+## Some Summary Statistics 
+
+```{r}
+# summary statistics 
+cfi_df |>
+  mutate(Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))) |>
+  group_by(Status) |>
+  summarize(med_age = median(AGEYR, na.rm = TRUE), 
+            med_baseline = median(baseline_score, na.rm = TRUE), 
+            med_stai = median(STAITOTAL, na.rm = TRUE), 
+            med_educ_yr = median(EDCCNTU, na.rm = TRUE))
+```
+Set global `ggplot` theme.
+
+```{r}
+# set ggplot theme for remaining plots
+font_add_google("Libre Baskerville", "Linux Libertine O") 
+showtext_auto() 
+showtext_opts(dpi = 300)
+
+theme_report <- function(base_size = 12, base_family = "Linux Libertine O") {
+  theme_bw(base_size = base_size, base_family = base_family) +
+    theme(
+      plot.title = element_text(size = rel(1.4), face = "bold", margin = margin(b = 10)),
+      plot.subtitle = element_text(size = rel(1.1), margin = margin(b = 10)),
+      axis.title = element_text(size = rel(1.1), face = "bold"),
+      axis.text = element_text(size = rel(1.0)),
+      legend.title = element_text(size = rel(1.1), face = "bold"),
+      legend.text = element_text(size = rel(1.0)),
+      legend.box.background = element_rect(color = "black", linewidth = 0.5)
+    )
+}
+
+# apply theme to all following plots
+theme_set(theme_report())
+
+# update font and bolding
+update_geom_defaults("text", list(family = "Linux Libertine O", fontface = "bold"))
+update_geom_defaults("label", list(family = "Linux Libertine O", fontface = "bold"))
+```
+
+
+## APOEN STATUS
+
+```{r}
+cfi_df |>
+  filter(!is.na(APOEGNPRSNFLG)) |>
+  mutate(
+    Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained")),
+    APOE4 = factor(APOEGNPRSNFLG, levels = c(0, 1), labels = c("Non-Carrier", "Carrier"))
+  ) |>
+  ggplot(aes(x = Status, fill = APOE4)) +
+  geom_bar(position = "fill", color = "black", alpha = 0.8) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Proportion of APOE4 Carriers by Study Retention",
+    x = "Study Status",
+    y = "Percentage",
+    fill = "APOE4 Status"
+  ) +
+  scale_fill_manual(values = c("Non-Carrier" = "#E69F00", "Carrier" = "#56B4E9"))
+ggsave("apoe4-status.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+```{r}
+table(Study_Status = cfi_df$R_y, APOE4_Status = cfi_df$APOEGNPRSNFLG)
+prop.table(table(cfi_df$R_y, cfi_df$APOEGNPRSNFLG), margin = 1) * 100
+```
+
+## CFITOTAL BASELINE SCORE 
+
+```{r}
+cfi_df |>
+  mutate(Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))) |>
+  ggplot(aes(x = baseline_score, fill = Status)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Baseline CFITOTAL Score by Study Retention",
+    x = "Score",
+    y = "Density",
+    fill = "Study Status"
+  ) +
+  scale_fill_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.8, 0.8)
+  )
+ggsave("base_cfitotal_dens.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+## AGE 
+
+```{r}
+cfi_df |>
+  mutate(Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))) |>
+  ggplot(aes(x = AGEYR, fill = Status)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Age Density by Study Retention",
+    x = "Age (Years)",
+    y = "Density",
+    fill = "Study Status"
+  ) +
+  scale_fill_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.8, 0.8)
+  )
+ggsave("age_dens.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+## EDUCATION 
+
+```{r}
+cfi_df |>
+  mutate(Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))) |>
+  ggplot(aes(x = EDCCNTU, fill = Status)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Education Density by Study Retention",
+    x = "Education (Years)",
+    y = "Density",
+    fill = "Study Status"
+  ) +
+  scale_fill_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.8, 0.8)
+  )
+#ggsave("edu_dens.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+## STAI
+
+```{r}
+cfi_df |>
+  mutate(Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))) |>
+  ggplot(aes(x = STAITOTAL, fill = Status)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Baseline Anxiety (STAI)",
+    x = "Baseline STAI Total Score",
+    y = "Density",
+    fill = "Study Status"
+  ) +
+  scale_fill_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  scale_color_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  theme(legend.position = "none")
+
+ggsave("stai_dens.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+## DELTA 48 SCORE
+
+```{r, warning=FALSE}
+cfi_df |>
+  filter(!is.na(z_delta_CFITOTAL_W48)) |>
+  mutate(Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))) |>
+  ggplot(aes(x = z_delta_CFITOTAL_W108, fill = Status)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Week 48 Cognitive Decline Density by Retention",
+    subtitle = "Higher scores indicate worsening cognitive function",
+    x = "Standardized CFI Change at Week 48",
+    y = "Density",
+    fill = "Study Status"
+  ) +
+  scale_fill_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.8, 0.8),
+    legend.box.background = element_rect(color = "black")
+  )
+ggsave("wk48_decline_dens.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+## Z DELTA OVERTIME
+
+```{r}
+# pivot data and calculate summary statistics
+cfi_summary <- cfi_df |>
+  select(BID, R_y, starts_with("z_delta_CFITOTAL_W")) |>
+  pivot_longer(
+    cols = starts_with("z_delta_CFITOTAL_W"),
+    names_to = "Week",
+    names_prefix = "z_delta_CFITOTAL_W",
+    values_to = "z_score"
+  ) |>
+  mutate(
+    Week = as.numeric(Week),
+    Status = factor(R_y, levels = c(0, 1), labels = c("Dropped Out", "Retained"))
+  ) |>
+  filter(!is.na(z_score)) |>
+  # calculate the mean and standard error for each group at each week
+  group_by(Status, Week) |>
+  summarize(
+    mean_change = mean(z_score),
+    se_change = sd(z_score) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(cfi_summary, aes(x = Week, y = mean_change, color = Status, group = Status)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(ymin = mean_change - 1.96 * se_change, ymax = mean_change + 1.96 * se_change),
+    width = 10, linewidth = 0.8
+  ) +
+  labs(
+    title = "Longitudinal Trajectory of Cognitive Decline",
+    subtitle = "Mean Standardized CFI Change. Higher scores indicate worsening.",
+    x = "Follow-up Time (Weeks)",
+    y = "Mean Standardized CFI Change",
+    color = "Study Status"
+  ) +
+  scale_color_manual(values = c("Dropped Out" = "#E683E6", "Retained" = "#45D5B1")) +
+  scale_x_continuous(breaks = c(48, 108, 168, 204, 240)) +
+  theme(legend.position = "bottom")
+ggsave("cfi_change_overtime.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+# Hypothesis Testing 
+
+```{r}
+# STAI & Age were not statistically significant at alpha = 0.05
+stai_test <- wilcox.test(STAITOTAL ~ R_y, data = cfi_df, exact = FALSE)
+print(stai_test)
+
+age_test <- t.test(AGEYR ~ R_y, data = cfi_df)
+print(age_test)
+
+# baseline score was statistically significant at alpha = 0.05
+cfi_base_test <- wilcox.test(baseline_score ~ R_y, data = cfi_df, exact = FALSE)
+print(cfi_base_test)
+# data:  baseline_score by R_y
+# W = 19165, p-value = 0.04663
+# alternative hypothesis: true location shift is not equal to 0
+```
+
+# ANALYSIS 
+
+## MICE 
+
+================================================================================================
+
+```{r}
+# prepare imputed data
+imputation_data <- cfi_df |>
+  select(CDPOS_W240, z_delta_CFITOTAL_W48, baseline_score, 
+         AGEYR, EDCCNTU, APOEGNPRSNFLG, STAITOTAL) |>
+  mutate(
+    # mice needs the outcome to be a factor to use log reg
+    CDPOS_W240 = as.factor(CDPOS_W240),
+    APOEGNPRSNFLG = as.factor(APOEGNPRSNFLG)
+  )
+
+set.seed(1)
+m_imputations <- 500
+imputed_datasets <- mice(imputation_data, m = m_imputations, maxit = 5, printFlag = FALSE)
+
+# initialize vector to store AUC vals
+mi_aucs <- numeric(m_imputations)
+
+for (i in 1:m_imputations) {
+  # extract the i-th completed dataset
+  comp_data <- complete(imputed_datasets, action = i)
+  
+  # cnvert the outcome to numeric for use in my compute_auc func
+  comp_data$CDPOS_W240 <- as.numeric(as.character(comp_data$CDPOS_W240))
+  
+  # match model in to original analysis
+  fit <- glm(CDPOS_W240 ~ z_delta_CFITOTAL_W48 + baseline_score, 
+             data = comp_data, family = binomial())
+  
+  # extract true values and predictions
+  y_true <- comp_data$CDPOS_W240
+  y_score <- predict(fit, type = "response")
+
+  mi_aucs[i] <- compute_auc(y_true, y_score)
+}
+
+# store results
+auc_df <- tibble(Imputed_AUC = mi_aucs)
+
+# original CCA AUC
+cca_auc <- 0.7416088
+```
+
+``` {r}
+auc_plot <- ggplot(auc_df, aes(x = Imputed_AUC)) +
+  geom_density(fill = "#E683E6", alpha = 0.5) +
+  geom_vline(xintercept = cca_auc, color = "#8647A1", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Impact of Missing Data on CFITOTAL Predictive Power",
+    subtitle = "Comparing Multiple Imputation Distribution to Complete Case Analysis",
+    x = "Area Under the Curve (AUC)",
+    y = "Density"
+  ) +
+  annotate("text", x = cca_auc, y = max(density(auc_df$Imputed_AUC)$y) * 0.9, 
+           label = paste("CCA AUC\n(", round(cca_auc, 4), ")"), 
+           color = "#8647A1", hjust = -0.2)
+auc_plot
+ggsave("auc_mice_plot.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+# IPW
+
+================================================================================================
+
+```{r}
+# P(R_Y = 1 | Z, X)
+m_cfi <- glm(
+  R_y ~ AGEYR + STAITOTAL + EDCCNTU + APOEGNPRSNFLG + baseline_score + z_delta_CFITOTAL_W48, 
+  family = "binomial",
+  data = cfi_df
+)
+summary(m_cfi)
+```
+
+```{r}
+cfi_df$prob_observed <- predict(m_cfi, type = "response")
+```
+
+```{r}
+cfi_df <- cfi_df |>
+  mutate(
+    weight = 1 / prob_observed
+  )
+summary(cfi_df$weight)
+```
+
+```{r}
+# fit the original model
+fit_cca <- glm(
+  CDPOS_W240 ~ z_delta_CFITOTAL_W48 + baseline_score,
+  family = "binomial",
+  data = cfi_df 
+)
+
+# fit the IPW weighted model
+fit_ipw <- glm(
+  CDPOS_W240 ~ z_delta_CFITOTAL_W48 + baseline_score,
+  family = "quasibinomial", 
+  weights = weight,
+  data = cfi_df 
+)
+summary(fit_cca)
+summary(fit_ipw)
+```
+
+IPW coefficients yield a higher log-odds coefficient of roughly 0.778 compared to CCA log-odds of 0.689. CCA actually underestimates the predictive power of the CFITOTAL Week 48 change score. This tells us that the missing data mechanism in the A4 study disproportionately filtered out individuals who would have demonstrated a stronger association between early subjective cognitive decline and long-term progression. Correcting for the MAR missingness reveals that the CFITOTAL is an even stronger predictor of AD progression than originally reported (!!).
+
+## Bootstrap IPW Coefficients
+
+```{r}
+set.seed(1) 
+B <- 2000
+N <- nrow(cfi_df)
+
+theta_b <- numeric(B) 
+beta_cca_vec <- numeric(B)
+beta_ipw_vec <- numeric(B)
+
+for (b in seq_len(B)) {
+  
+  # sample data WITH replacement
+  boot_idx <- sample.int(N, replace = TRUE)
+  d_b <- cfi_df[boot_idx, ]
+  
+  # fit model on the bootstrap sample 
+  fit_miss <- glm(R_y ~ AGEYR + STAITOTAL + EDCCNTU + APOEGNPRSNFLG + baseline_score + z_delta_CFITOTAL_W48, family = "binomial", data = d_b)
+  
+  d_b$prob_observed <- predict(fit_miss, type = "response")
+  # calculate the weight
+  d_b$weight <- 1 / d_b$prob_observed
+  
+  # filter to R_y = 1
+  d_b_observed <- d_b |> filter(R_y == 1)
+  
+  # CCA model
+  fit_cca <- glm(CDPOS_W240 ~ z_delta_CFITOTAL_W48 + baseline_score,
+                 family = "binomial", data = d_b_observed)
+  
+  beta_cca <- coef(fit_cca)["z_delta_CFITOTAL_W48"]
+  
+  # IPW model
+  fit_ipw <- glm(CDPOS_W240 ~ z_delta_CFITOTAL_W48 + baseline_score,
+                 family = "quasibinomial", weights = weight, data = d_b_observed)
+  
+  beta_ipw <- coef(fit_ipw)["z_delta_CFITOTAL_W48"]
+  
+  # store values 
+  theta_b[b] <- beta_ipw - beta_cca
+  beta_cca_vec[b] <- beta_cca
+  beta_ipw_vec[b] <- beta_ipw
+}
+```
+
+## Hypothesis Test
+
+$$
+\theta = \beta_{1, IPW} - \beta_{1, CCA}\\
+H_0: \theta = 0\\
+H_A: \theta \neq 0
+$$
+
+``` {r}
+theta_sorted <- sort(theta_b)
+ci_lower <- quantile(theta_sorted, probs = 0.025)
+ci_upper <- quantile(theta_sorted, probs = 0.975)
+ci_lower
+ci_upper
+``` 
+
+## Density Plot
+
+``` {r}
+res <- data.frame(
+  boot = rep(1:B, 2),
+  method = rep(c("IPW", "Complete-Case"), each = B),
+  estimate = c(beta_ipw_vec, beta_cca_vec)
+)
+
+ggplot(res, aes(x = estimate, fill = method)) + 
+  geom_density(alpha = 0.4) +
+  xlab("CFITOTAL Week 48 Coefficient (Log-Odds)") +
+  ylab("Bootstrap Distribution Density") +
+  scale_fill_manual(name = "Method",
+                    values = c("IPW" = "#E683E6", "Complete-Case" = "#45D5B1")) +
+  theme(legend.position = "inside", 
+        legend.position.inside = c(0.8, 0.8),
+        legend.box.background = element_rect())
+
+ggsave("ipw_bootstrap_coef.png", width = 8, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+# M2: Missing Not at Random
+
+$P_{m, y1} = P(R_Y = 0 | Y = 1)$: Probability that a person drops out, iven that they actually progressed to dementia0
+$P_{m, y0} = P(R_Y = 0 | Y = 0)$: Probability that a person drops out, given they did NOT progress to dementia
+
+$$
+\Gamma = \frac{P_{m, y1}}{P_{m, y0}} = \frac{ P(R_Y = 0 | Y = 1)}{ P(R_Y = 0 | Y = 0)}
+$$
+
+```{r}
+# separate the observed and missing groups
+obs_df <- cfi_df |> filter(R_y == 1)
+missing_df <- cfi_df |> filter(R_y == 0)
+
+# create a vector for the range of theoretical proportions of 
+# dropouts who progressed to CDR = 1
+pi_drop <- seq(0, 1, by = 0.05)
+M <- 20 
+
+results_mnar <- data.frame()
+
+set.seed(1) 
+for (rate in pi_drop) {
+
+  # based on rate, divide the unobserved dropout cohort into 
+  # hypothetical progressors (CDR = 1) vs non-progressors (CDR = 0)
+  m_CDR_1 <- rate * nrow(missing_df) 
+  m_CDR_0 <- nrow(missing_df) - m_CDR_1
+  
+  # p_m_y1 = (# of missing progressors) / (total # of progressors)
+  p_m_y1 <- m_CDR_1 / (sum(obs_df$CDPOS_W240 == 1) + m_CDR_1)
+  # p_m_y0 = (# of missing NON-progressors) / (total # of NON-progressors)
+  p_m_y0 <- m_CDR_0 / (sum(obs_df$CDPOS_W240 == 0) + m_CDR_0)
+  
+  # calculate gamma (risk ratio)
+  gamma_ratio <- ifelse(p_m_y0 == 0, NA, p_m_y1 / p_m_y0) 
+  
+  coef_estimates <- numeric(M)
+  var_estimates <- numeric(M)
+  
+  # this loops creates synthetic data based on the assumed rate 
+  # for each missing obs, assign a counterfactual outcome by 
+  # assigning a 0 or 1 based on a bern(p = rate) dist
+  for (m in 1:M) {
+    imputed_missing <- missing_df |>
+      mutate(CDPOS_W240 = rbinom(n(), 1, prob = rate))
+    
+    combined_data <- bind_rows(obs_df, imputed_missing)
+    
+    # fit the model on the imputed full data set
+    fit <- glm(
+      CDPOS_W240 ~ z_delta_CFITOTAL_W48 + baseline_score,
+      family = "binomial",
+      data = combined_data
+    )
+    
+    # get estimate and variance for CFI 
+    tidy_fit <- tidy(fit) |> filter(term == "z_delta_CFITOTAL_W48")
+    coef_estimates[m] <- tidy_fit$estimate
+    var_estimates[m] <- (tidy_fit$std.error)^2
+  }
+  
+  # pooling the M estimates together using Rubin's Rules
+  pooled_estimate <- mean(coef_estimates)
+  W <- mean(var_estimates)
+  B <- var(coef_estimates)
+  
+  # calculate the total variance using the formula:
+  total_var <- W + (1 + 1/M) * B 
+  pooled_se <- sqrt(total_var)
+  
+  # calculate final pooled p-value
+  z_stat <- pooled_estimate / pooled_se
+  pooled_p_value <- 2 * (1 - pnorm(abs(z_stat)))
+  
+  results_mnar <- rbind(results_mnar, data.frame(
+    pi_drop = rate,
+    Gamma = gamma_ratio,
+    Pooled_Estimate = pooled_estimate,
+    Pooled_SE = pooled_se,
+    Pooled_P_Value = pooled_p_value
+  ))
+}
+
+table_output <- results_mnar |>
+  filter(pi_drop %in% c(0.00, 0.25, 0.50, 0.75, 1.00)) |>
+  mutate(
+    pi_drop = paste0(pi_drop * 100, "%"),
+    Gamma = round(Gamma, 2),
+    Pooled_Estimate = round(Pooled_Estimate, 3),
+    Pooled_SE = round(Pooled_SE, 3),
+    Pooled_P_Value = ifelse(Pooled_P_Value < 0.001, "<0.001", round(Pooled_P_Value, 3))
+  ) |>
+  rename(
+    `Rate (π_drop)` = pi_drop,
+    `Risk Ratio (Γ)` = Gamma,
+    `Coefficient (Log-Odds)` = Pooled_Estimate,
+    `SE` = Pooled_SE,
+    `P-Value` = Pooled_P_Value
+  )
+
+# create a table for the report
+table_output |>
+  gt() |>
+  tab_header(
+    title = md("**Sensitivity Analysis Under MNAR Conditions**")
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) |>
+  opt_table_lines(extent = "default") |>
+  tab_options(
+    table.border.top.color = "black",
+    table.border.top.width = px(2),
+    table.border.bottom.color = "black",
+    table.border.bottom.width = px(2),
+    heading.align = "left"
+  ) |>
+  gtsave(filename = "mnar_sensitivity_table.png", expand = 10)
+```
+
+```{r}
+table_output2 <- results_mnar |>
+  mutate(
+    pi_drop = paste0(pi_drop * 100, "%"),
+    Gamma = round(Gamma, 2),
+    Pooled_Estimate = round(Pooled_Estimate, 3),
+    Pooled_SE = round(Pooled_SE, 3),
+    Pooled_P_Value = ifelse(Pooled_P_Value < 0.001, "<0.001", round(Pooled_P_Value, 3))
+  ) |>
+  rename(
+    `Rate (π_drop)` = pi_drop,
+    `Risk Ratio (Γ)` = Gamma,
+    `Coefficient (Log-Odds)` = Pooled_Estimate,
+    `SE` = Pooled_SE,
+    `P-Value` = Pooled_P_Value
+  )
+
+# create a table for the appendix
+table_output2 |>
+  gt() |>
+  tab_header(
+    title = md("**Sensitivity Analysis Under MNAR Conditions**")
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) |>
+  opt_table_lines(extent = "default") |>
+  tab_options(
+    table.border.top.color = "black",
+    table.border.top.width = px(2),
+    table.border.bottom.color = "black",
+    table.border.bottom.width = px(2),
+    heading.align = "left"
+  ) |>
+  gtsave(filename = "mnar_sensitivity_table_appendix.png", expand = 10)
+```
+
+```{r}
+print(results_mnar)
+```
+
